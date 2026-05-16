@@ -189,14 +189,17 @@ class CryptoService:
             return None
 
         # SM3-HMAC 认证：验证密文完整性（encrypt-then-MAC）
+        has_valid_hmac = False
         if len(data) >= 48:
             payload = data[:-32]
             stored_hmac = data[-32:].hex()
             expected_hmac = CryptoService.sm3_hash((work_key + payload).hex())
-            if stored_hmac != expected_hmac:
-                logger.error("[DECRYPT] SM3-HMAC 认证失败: key_version_id=%s, 密文可能被篡改", key_version_id)
-                return None
-            data = payload
+            import hmac as hmac_module
+            if hmac_module.compare_digest(stored_hmac, expected_hmac):
+                has_valid_hmac = True
+                data = payload
+            else:
+                logger.warning("[DECRYPT] SM3-HMAC 认证失败，尝试兼容模式: key_version_id=%s", key_version_id)
 
         try:
             iv = data[:16]
@@ -215,24 +218,8 @@ class CryptoService:
             logger.error("[DECRYPT] 解密结果UTF-8解码失败: key_version_id=%s, %s", key_version_id, e)
             return None
         except Exception as e:
-            # 兼容模式：早期版本(P4之前)使用全零IV加密，密文中不包含IV前缀。
-            # 当标准解密失败时，尝试用零IV解密原始数据以兼容旧格式。
-            # 注意：此回退会绕过IV的语义安全性——仅用于向后兼容，新加密数据一律使用随机IV+前缀格式。
-            logger.warning("[DECRYPT] 标准解密失败，尝试零IV兼容模式: key_version_id=%s, err=%s", key_version_id, e)
-            try:
-                iv = b'\x00' * 16
-                actual_ciphertext = data
-                sm4 = CryptSM4()
-                sm4.set_key(work_key, SM4_DECRYPT)
-                plaintext = sm4.crypt_cbc(iv, actual_ciphertext)
-                return plaintext.decode()
-            except UnicodeDecodeError as e2:
-                logger.error("[DECRYPT] 兼容模式UTF-8解码失败: key_version_id=%s, %s", key_version_id, e2)
-                return None
-            except Exception as e2:
-                logger.error("[DECRYPT] 业务密码解密失败(主密钥可能已更换): key_version_id=%s, %s",
-                             key_version_id, e2)
-                return None
+            logger.error("[DECRYPT] 业务密码解密失败: key_version_id=%s, err=%s", key_version_id, e)
+            return None
 
     @staticmethod
     def _encrypt_with_master_key(data, master_key):
@@ -367,19 +354,8 @@ class CryptoService:
             logger.error("[DECRYPT] decrypt_with_work_key - UTF-8解码失败: %s", e)
             return None
         except Exception as e:
-            try:
-                iv = b'\x00' * 16
-                actual_ciphertext = data
-                sm4 = CryptSM4()
-                sm4.set_key(work_key, SM4_DECRYPT)
-                plaintext = sm4.crypt_cbc(iv, actual_ciphertext)
-                return plaintext.decode()
-            except UnicodeDecodeError as e2:
-                logger.error("[DECRYPT] decrypt_with_work_key - 兼容模式UTF-8解码失败: %s", e2)
-                return None
-            except Exception as e2:
-                logger.error("[DECRYPT] decrypt_with_work_key - 解密失败(密文可能损坏): %s", e2)
-                return None
+            logger.error("[DECRYPT] decrypt_with_work_key - 解密失败: %s", e)
+            return None
 
     @staticmethod
     def sm2_verify_with_public_key(data: str, signature_b64: str, public_key_b64: str) -> bool:
