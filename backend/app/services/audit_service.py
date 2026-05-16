@@ -54,17 +54,13 @@ def write_audit_log(log_type, operator, source_ip, target_asset, operation_detai
 
 
 def rebuild_hash_chain():
-    """Rebuild all audit log hash chains.
-    Refuses to rebuild if any locked logs exist — locked hashes are permanently frozen.
-    Only safe to rebuild when zero locked logs exist.
+    """Rebuild audit log hash chain, preserving locked logs' frozen hashes.
+
+    Locked logs are treated as immutable anchors — their hashes are kept as-is
+    and used as the previous_hash for the next unlocked log. Only unlocked logs
+    are recalculated.
     """
     from app.services.crypto_service import CryptoService
-
-    locked_count = AuditLog.query.filter_by(is_locked=True).count()
-    if locked_count > 0:
-        logger.warning("[HASH-REBUILD] Refusing to rebuild: %d locked logs exist. "
-                       "Locked logs have frozen hashes that cannot be rebuilt.", locked_count)
-        return -1  # signal: cannot rebuild
 
     logs = AuditLog.query.order_by(AuditLog.id).all()
     if not logs:
@@ -73,6 +69,11 @@ def rebuild_hash_chain():
     previous_hash = ''
     updated = 0
     for log in logs:
+        if log.is_locked:
+            # Locked log: keep its hash, use it as anchor for the next log
+            previous_hash = log.current_hash
+            continue
+
         is_deleted_val = 1 if log.is_deleted else 0
         data_to_hash = (
             f"{log.log_type}|{log.operator}|{log.source_ip}|"
