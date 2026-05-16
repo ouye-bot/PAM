@@ -11,13 +11,18 @@ _lock = threading.Lock()
 # Redis backend (lazy init)
 _redis_client = None
 _redis_available = False
+_redis_last_retry = 0
 
 
 def _get_redis():
-    """Lazy-init Redis connection for rate limiting."""
-    global _redis_client, _redis_available
-    if _redis_client is not None:
-        return _redis_client if _redis_available else None
+    """Lazy-init Redis connection for rate limiting. Retries every 60s after failure."""
+    global _redis_client, _redis_available, _redis_last_retry
+    if _redis_available and _redis_client is not None:
+        return _redis_client
+    # Retry every 60 seconds after failure
+    now = time.time()
+    if not _redis_available and _redis_client is not None and (now - _redis_last_retry) < 60:
+        return None
     try:
         import redis
         redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
@@ -28,6 +33,8 @@ def _get_redis():
         return _redis_client
     except Exception as e:
         _redis_available = False
+        _redis_client = None
+        _redis_last_retry = now
         logger.warning("[RATE_LIMITER] Redis unavailable (%s), using in-memory backend", e)
         return None
 

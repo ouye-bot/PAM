@@ -786,13 +786,13 @@ def init_scheduler(app):
 
 
 def shutdown_scheduler(wait=True, timeout=10):
-    """Gracefully shutdown the scheduler, waiting for running jobs."""
+    """Gracefully shutdown the scheduler."""
     if not scheduler.running:
         logger.info("[SCHEDULER] Scheduler not running, skipping shutdown")
         return
-    logger.info("[SCHEDULER] Shutting down scheduler (wait=%s, timeout=%ds)...", wait, timeout)
+    logger.info("[SCHEDULER] Shutting down scheduler...")
     try:
-        scheduler.shutdown(wait=wait)
+        scheduler.shutdown(wait=False)
         logger.info("[SCHEDULER] Scheduler shutdown complete")
     except Exception as e:
         logger.error("[SCHEDULER] Scheduler shutdown error: %s", e)
