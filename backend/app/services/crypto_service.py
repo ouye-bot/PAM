@@ -189,17 +189,16 @@ class CryptoService:
             return None
 
         # SM3-HMAC 认证：验证密文完整性（encrypt-then-MAC）
-        has_valid_hmac = False
         if len(data) >= 48:
             payload = data[:-32]
             stored_hmac = data[-32:].hex()
             expected_hmac = CryptoService.sm3_hash((work_key + payload).hex())
             import hmac as hmac_module
             if hmac_module.compare_digest(stored_hmac, expected_hmac):
-                has_valid_hmac = True
                 data = payload
             else:
-                logger.warning("[DECRYPT] SM3-HMAC 认证失败，尝试兼容模式: key_version_id=%s", key_version_id)
+                logger.error("[DECRYPT] SM3-HMAC 认证失败: key_version_id=%s", key_version_id)
+                return None
 
         try:
             iv = data[:16]
