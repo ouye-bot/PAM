@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify
 from datetime import datetime, date, timedelta
+import re
 from app.models import Asset, RotationTask, AuditLog, Credential
 from app.utils.auth import token_required, role_required
 from app.utils.logger import get_logger
@@ -7,6 +8,31 @@ from sqlalchemy import func
 from app import db
 
 logger = get_logger('app.api.dashboard')
+
+WEAK_PASSWORD_PATTERNS = [
+    r'^\d+$',           #纯数字
+    r'^[a-zA-Z]+$',     #纯字母
+    r'^(.)\1{7,}$',     #重复字符8位以上
+]
+
+COMMON_WEAK_PASSWORDS = {
+    '12345678', '123456789', '1234567890',
+    'password', 'admin123', 'root1234',
+    'qwerty123', 'abc12345', '11111111',
+    '00000000', '88888888', 'a1234567',
+}
+
+
+def _is_weak_password(password):
+    """检测密码是否为弱密码"""
+    if not password or len(password) < 8:
+        return True
+    if password.lower() in COMMON_WEAK_PASSWORDS:
+        return True
+    for pattern in WEAK_PASSWORD_PATTERNS:
+        if re.match(pattern, password):
+            return True
+    return False
 
 dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/api/dashboard')
 
@@ -38,9 +64,27 @@ def get_dashboard_stats():
             AuditLog.log_type == 'bypass_detected'
         ).count()
         
-        # 5. 弱口令资产数（简单实现：这里假设所有资产都有凭证）
-        # 实际项目中可能需要更复杂的弱口令检测逻辑
+        # 5. 弱口令资产数（解密最新凭据密码检测）
         weak_password_assets = 0
+        try:
+            from app.services.crypto_service import CryptoService
+            active_assets_with_creds = Asset.query.filter(
+                Asset.status == 'active'
+            ).all()
+            for asset in active_assets_with_creds:
+                if not asset.credentials:
+                    continue
+                credential = max(asset.credentials, key=lambda c: c.id)
+                password = CryptoService.sm4_decrypt(
+                    credential.encrypted_password, credential.key_version
+                )
+                if password and _is_weak_password(password):
+                    weak_password_assets += 1
+                    del password
+                elif password:
+                    del password
+        except Exception as weak_err:
+            logger.warning("[DASHBOARD] 弱密码检测异常: %s", weak_err)
         
         # 6. 今日高危操作拦截数
         today_sql_blocks = AuditLog.query.filter(
@@ -118,7 +162,7 @@ def get_dashboard_stats():
         logger.error("[DASHBOARD API] Error", exc_info=True)
         return jsonify({
             'code': 500,
-            'message': f'获取统计数据失败: {str(e)}'
+            'message': '获取统计数据失败'
         }), 500
 
 @dashboard_bp.route('/rotation-trend', methods=['GET'])
@@ -149,5 +193,5 @@ def get_rotation_trend():
         logger.error("[ROTATION TREND API] Error", exc_info=True)
         return jsonify({
             'code': 500,
-            'message': f'获取改密趋势失败: {str(e)}'
+            'message': '获取改密趋势失败'
         }), 500
