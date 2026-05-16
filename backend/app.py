@@ -122,7 +122,8 @@ def health_check():
         KeyVersion.query.first()
         checks['database'] = 'ok'
     except Exception as e:
-        checks['database'] = f'error: {str(e)}'
+        logger.warning("[HEALTH] database check failed: %s", e)
+        checks['database'] = 'error'
         overall = 'degraded'
 
     # 主密钥检查
@@ -131,7 +132,8 @@ def health_check():
         mk = get_master_key()
         checks['master_key'] = 'ok' if mk and len(mk) == 32 else 'invalid'
     except Exception as e:
-        checks['master_key'] = f'error: {str(e)}'
+        logger.warning("[HEALTH] master_key check failed: %s", e)
+        checks['master_key'] = 'error'
         overall = 'degraded'
 
     # 活跃工作密钥检查
@@ -145,7 +147,9 @@ def health_check():
         else:
             checks['active_work_key'] = 'not_found'
     except Exception as e:
-        checks['active_work_key'] = f'error: {str(e)}'
+        logger.warning("[HEALTH] active_work_key check failed: %s", e)
+        checks['active_work_key'] = 'error'
+        overall = 'degraded'
 
     # Redis 检查
     try:
@@ -155,7 +159,8 @@ def health_check():
         r.ping()
         checks['redis'] = 'ok'
     except Exception as e:
-        checks['redis'] = f'error: {str(e)}'
+        logger.warning("[HEALTH] redis check failed: %s", e)
+        checks['redis'] = 'error'
         if overall == 'ok':
             overall = 'degraded'
 
@@ -164,11 +169,11 @@ def health_check():
         from app.scheduler import scheduler
         checks['scheduler'] = 'ok' if scheduler.running else 'stopped'
     except Exception as e:
-        checks['scheduler'] = f'error: {str(e)}'
+        logger.warning("[HEALTH] scheduler check failed: %s", e)
+        checks['scheduler'] = 'error'
 
     # 录制目录可写性
     try:
-        import tempfile
         recordings_dir = os.path.join(os.path.dirname(__file__), 'recordings')
         if not os.path.exists(recordings_dir):
             os.makedirs(recordings_dir, exist_ok=True)
@@ -178,7 +183,8 @@ def health_check():
         os.remove(test_file)
         checks['recordings_dir'] = 'ok'
     except Exception as e:
-        checks['recordings_dir'] = f'error: {str(e)}'
+        logger.warning("[HEALTH] recordings_dir check failed: %s", e)
+        checks['recordings_dir'] = 'error'
 
     from app import __version__
     return jsonify({
@@ -295,6 +301,12 @@ if __name__ == '__main__':
     # 初始化调度器
     from app.scheduler import init_scheduler
     init_scheduler(app)
+
+    # 注册优雅关闭钩子
+    import atexit
+    from app.scheduler import shutdown_scheduler
+    atexit.register(shutdown_scheduler, wait=True, timeout=10)
+    logger.info("[APP] Registered graceful shutdown hook")
 
     # 初始化全局速率限制器
     from app.utils.rate_limiter import start_cleanup_thread
