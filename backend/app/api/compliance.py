@@ -16,7 +16,7 @@ def get_compliance_report():
     # 分页：对 checks 列表分页
     checks = report.get('checks', [])
     page = request.args.get('page', 1, type=int)
-    size = request.args.get('size', 10, type=int)
+    size = request.args.get('page_size', 10, type=int)
     page = max(1, page)
     size = max(1, min(100, size))
 
@@ -26,9 +26,9 @@ def get_compliance_report():
     paginated_checks = checks[start:end]
 
     report['checks'] = paginated_checks
-    report['total'] = total
-    report['page'] = page
-    report['size'] = size
+    report['total_checks'] = total
+    report['current_page'] = page
+    report['page_size'] = size
 
     return jsonify({
         'code': 200,

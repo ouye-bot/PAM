@@ -41,7 +41,7 @@
             v-model:current-page="currentPage"
             :page-size="pageSize"
             :total="totalChecks"
-            layout="prev, pager, next"
+            layout="total, prev, pager, next"
             @current-change="handlePageChange"
           />
         </div>
@@ -98,10 +98,10 @@ const loadReport = async (page = 1) => {
   loading.value = true
   currentPage.value = page
   try {
-    const res = await request.get(`/compliance/report?page=${page}&size=${pageSize.value}`)
+    const res = await request.get(`/compliance/report?page=${page}&page_size=${pageSize.value}`)
     if (res.code === 200) {
       report.value = res.data
-      totalChecks.value = res.data.total || 0
+      totalChecks.value = res.data.total_checks || 0
     }
   } catch (err) {
     console.error('获取合规报告失败:', err)
