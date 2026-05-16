@@ -47,6 +47,37 @@ def verify_temp_token(temp_token):
     return user_info
 
 
+def generate_password_view_token(user_id, username, asset_id, credential_id):
+    """Generate a temp token for password viewing — bound to user+asset+credential, 5min TTL."""
+    token = str(uuid.uuid4())
+    _temp_tokens[token] = {
+        "user_id": user_id,
+        "username": username,
+        "asset_id": asset_id,
+        "credential_id": credential_id,
+        "purpose": "password_view",
+        "expires_at": time.time() + 300
+    }
+    return token
+
+
+def verify_password_view_token(token, credential_id):
+    """Verify a password-view temp token. Returns user_info or None. One-time use."""
+    if token not in _temp_tokens:
+        return None
+    token_data = _temp_tokens[token]
+    if time.time() > token_data['expires_at']:
+        del _temp_tokens[token]
+        return None
+    if token_data.get('purpose') != 'password_view':
+        return None
+    if token_data.get('credential_id') != credential_id:
+        return None
+    user_info = token_data.copy()
+    del _temp_tokens[token]  # one-time use
+    return user_info
+
+
 def generate_sm2_challenge(user_id, client_ip):
     """生成SM2挑战码，返回 (sm2_token, challenge)"""
     nonce = os.urandom(16).hex()
@@ -561,3 +592,15 @@ def verify_password_endpoint():
         return jsonify({'code': 200, 'valid': True})
     else:
         return jsonify({'code': 200, 'valid': False})
+
+
+@auth_bp.route('/password-view-token', methods=['POST'])
+@token_required
+def get_password_view_token():
+    """Generate a one-time token for viewing a specific credential's password."""
+    data = request.get_json()
+    credential_id = data.get('credential_id')
+    if not credential_id:
+        return jsonify({'code': 400, 'message': 'credential_id is required'}), 400
+    token = generate_password_view_token(request.user_id, request.username, data.get('asset_id'), credential_id)
+    return jsonify({'code': 200, 'data': {'view_token': token}})

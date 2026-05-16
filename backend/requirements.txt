@@ -19,3 +19,4 @@ bcrypt
 DBUtils
 gmssl
 pywinrm>=0.4.0
+redis

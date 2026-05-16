@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: pam-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - pam-net
+    restart: unless-stopped
+
+networks:
+  pam-net:
+    name: pam-net
+    driver: bridge

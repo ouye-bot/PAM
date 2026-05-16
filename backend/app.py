@@ -69,8 +69,21 @@ app.register_blueprint(users_bp)
 app.register_blueprint(me_bp)
 app.register_blueprint(compliance_bp)
 
-# 初始化SocketIO
-socketio = SocketIO(app, cors_allowed_origins='*')
+# 初始化SocketIO — 优先使用Redis消息队列，不可用时回退内存模式
+import os
+redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+socketio_kwargs = {'cors_allowed_origins': '*'}
+
+try:
+    import redis
+    r = redis.Redis.from_url(redis_url, socket_connect_timeout=2)
+    r.ping()
+    socketio_kwargs['message_queue'] = redis_url
+    logger.info("[SOCKETIO] Using Redis message queue: %s", redis_url)
+except Exception as e:
+    logger.warning("[SOCKETIO] Redis unavailable (%s), falling back to in-memory mode", e)
+
+socketio = SocketIO(app, **socketio_kwargs)
 
 # 将socketio对象赋值给app模块
 import importlib
@@ -193,47 +206,51 @@ if __name__ == '__main__':
     with app.app_context():
         from app.models import AuditLog
         from app.services.crypto_service import CryptoService
-        
-        logger.info("=== 开始重建审计日志哈希链 ===")
-        
-        # 获取所有审计日志，按ID顺序排列
-        logs = AuditLog.query.order_by(AuditLog.id).all()
-        
-        if logs:
-            logger.info("发现 %d 条审计日志", len(logs))
-            
-            previous_hash = ''
-            updated_count = 0
-            
-            for log in logs:
-                # 拼接字符串（包含is_deleted字段）
-                is_deleted = 1 if log.is_deleted else 0
-                data_to_hash = f"{log.log_type}|{log.operator}|{log.source_ip}|{log.target_asset}|{log.operation_detail}|{log.result}|{log.timestamp}|{previous_hash}|{is_deleted}"
-                
-                # 计算哈希值
-                calculated_hash = CryptoService.sm3_hash(data_to_hash)
-                
-                # 更新哈希值
-                log.previous_hash = previous_hash
-                log.current_hash = calculated_hash
-                
-                # 更新previous_hash为当前日志的current_hash
-                previous_hash = calculated_hash
-                
-                updated_count += 1
-                logger.debug("已更新日志 ID: %d, 类型: %s", log.id, log.log_type)
-            
-            # 保存到数据库
-            try:
-                db.session.commit()
-                logger.info("=== 哈希链重建完成 ===")
-                logger.info("成功更新 %d 条审计日志", updated_count)
-                logger.info("审计日志哈希链已修复")
-            except Exception as e:
-                db.session.rollback()
-                logger.error("=== 重建失败 ===", exc_info=True)
+
+        locked_count = AuditLog.query.filter_by(is_locked=True).count()
+        if locked_count > 0:
+            logger.info("=== 哈希链重建跳过: 存在 %d 条已锁定日志，链已永久冻结 ===", locked_count)
         else:
-            logger.info("没有审计日志需要处理")
+            logger.info("=== 开始重建审计日志哈希链 ===")
+
+            # 获取所有审计日志，按ID顺序排列
+            logs = AuditLog.query.order_by(AuditLog.id).all()
+
+            if logs:
+                logger.info("发现 %d 条审计日志", len(logs))
+
+                previous_hash = ''
+                updated_count = 0
+
+                for log in logs:
+                    # 拼接字符串（包含is_deleted字段）
+                    is_deleted = 1 if log.is_deleted else 0
+                    data_to_hash = f"{log.log_type}|{log.operator}|{log.source_ip}|{log.target_asset}|{log.operation_detail}|{log.result}|{log.timestamp}|{previous_hash}|{is_deleted}"
+
+                    # 计算哈希值
+                    calculated_hash = CryptoService.sm3_hash(data_to_hash)
+
+                    # 更新哈希值
+                    log.previous_hash = previous_hash
+                    log.current_hash = calculated_hash
+
+                    # 更新previous_hash为当前日志的current_hash
+                    previous_hash = calculated_hash
+
+                    updated_count += 1
+                    logger.debug("已更新日志 ID: %d, 类型: %s", log.id, log.log_type)
+
+                # 保存到数据库
+                try:
+                    db.session.commit()
+                    logger.info("=== 哈希链重建完成 ===")
+                    logger.info("成功更新 %d 条审计日志", updated_count)
+                    logger.info("审计日志哈希链已修复")
+                except Exception as e:
+                    db.session.rollback()
+                    logger.error("=== 重建失败 ===", exc_info=True)
+            else:
+                logger.info("没有审计日志需要处理")
 
     # 初始化调度器
     from app.scheduler import init_scheduler

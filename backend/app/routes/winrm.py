@@ -2,7 +2,6 @@ import os
 import json
 import time
 import uuid
-import struct
 import threading
 from datetime import datetime
 from concurrent.futures import Future
@@ -14,39 +13,14 @@ from app.models import Asset, Credential, SessionRecord, User
 from app.services.crypto_service import CryptoService
 from app.services.audit_service import write_audit_log
 from app.services.command_interceptor import intercept_command
+from app.services.recording_service import start_recording, write_recording_header, append_recording_frame, cleanup_recording
 from app.utils.auth import verify_token
 from app.utils.logger import get_logger
 
 logger = get_logger('app.routes.winrm')
 
-recordings_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'recordings')
-if not os.path.exists(recordings_dir):
-    os.makedirs(recordings_dir)
-
 active_connections = {}
 _pending_signatures = {}
-
-
-def _encrypt_recording_file(session_record):
-    plaintext_path = session_record.recording_path
-    if not plaintext_path or not os.path.exists(plaintext_path):
-        return
-    if not plaintext_path.endswith('.cast'):
-        return
-    enc_path = plaintext_path + '.enc'
-    with open(plaintext_path, 'rb') as f:
-        plaintext = f.read()
-    dek = os.urandom(16)
-    iv, ciphertext = CryptoService.sm4_cbc_encrypt_bytes(plaintext, dek)
-    encrypted_dek = CryptoService.encrypt_dek_with_master_key(dek)
-    with open(enc_path, 'wb') as f:
-        f.write(struct.pack('>I', len(encrypted_dek)))
-        f.write(encrypted_dek)
-        f.write(iv)
-        f.write(ciphertext)
-    os.remove(plaintext_path)
-    session_record.recording_path = enc_path
-    db.session.commit()
 
 
 def _cleanup_connection(session_id):
@@ -70,8 +44,6 @@ def _cleanup_connection(session_id):
                 pass
             except Exception as e:
                 logger.error('[WINRM WS] Error closing protocol: %s', e)
-        if conn_info.get('recording_file'):
-            conn_info['recording_file'].close()
     except Exception as e:
         logger.error('[WINRM WS] Error during cleanup: %s', e)
 
@@ -80,7 +52,7 @@ def _cleanup_connection(session_id):
         session_record.end_time = datetime.now()
         db.session.commit()
         try:
-            _encrypt_recording_file(session_record)
+            cleanup_recording(conn_info.get('recording_file'), session_record)
         except Exception as enc_err:
             current_app.logger.critical('[WINRM WS] Recording encryption failed: %s', enc_err)
 
@@ -182,20 +154,9 @@ def handle_winrm_connect(data):
         gc.collect()
 
     session_id = str(uuid.uuid4())
-    recording_filename = f"{asset_id}_{decoded.get('user_id')}_{session_id}.cast"
-    recording_path = os.path.join(recordings_dir, recording_filename)
-    recording_file = open(recording_path, 'w', encoding='utf-8')
-
+    recording_file, recording_path = start_recording(asset_id, decoded.get('user_id'), session_id)
     initial_timestamp = time.time()
-    cast_header = {
-        "version": 2,
-        "width": 120,
-        "height": 40,
-        "timestamp": int(initial_timestamp)
-    }
-    header_line = json.dumps(cast_header, separators=(',', ':')) + '\n'
-    recording_file.write(header_line)
-    recording_file.flush()
+    write_recording_header(recording_file, 120, 40, initial_timestamp)
 
     user_id = decoded.get('user_id')
     username = decoded.get('username', 'unknown')
@@ -496,10 +457,7 @@ def _write_recording_output(conn_info, stdout, stderr):
         time_diff = round(time.time() - initial_timestamp, 6)
         combined = stdout + stderr
         if combined:
-            output_data = [time_diff, combined]
-            line = json.dumps(output_data, separators=(',', ':'), ensure_ascii=False) + '\n'
-            conn_info['recording_file'].write(line)
-            conn_info['recording_file'].flush()
+            append_recording_frame(conn_info['recording_file'], combined, time_diff)
     except Exception as e:
         logger.error('[WINRM WS] Recording write error: %s', str(e))
 

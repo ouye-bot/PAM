@@ -1,6 +1,6 @@
 from flask_apscheduler import APScheduler
 from app.models import Asset
-from app.services.audit_service import write_audit_log
+from app.services.audit_service import write_audit_log, auto_lock_old_logs
 from app.services.password_rotation import rotate_password
 from app.services.bypass_detector import detect_bypass_for_asset
 import paramiko
@@ -770,6 +770,15 @@ def init_scheduler(app):
     #     trigger='interval',
     #     seconds=30
     # )
+
+    # 审计日志自动锁定（每日凌晨3点，锁定30天前的日志）
+    scheduler.add_job(
+        id='auto_lock_audit_logs',
+        func=auto_lock_old_logs,
+        trigger='cron',
+        hour=3,
+        minute=0
+    )
 
     scheduler.start()
 

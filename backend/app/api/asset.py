@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
 from app import db
 from app.models import Asset, Credential, AuditLog, RotationTask, SessionRecord
@@ -6,6 +6,7 @@ from app.services.crypto_service import CryptoService
 from app.services.audit_service import write_audit_log
 from app.services.asset_scanner import scan_network
 from app.utils.auth import token_required, role_required
+from app.api.auth import verify_password_view_token
 from app.drivers import get_driver
 from app.utils.logger import get_logger
 
@@ -172,8 +173,18 @@ def add_asset():
 @token_required
 @role_required('admin', 'operator')
 def view_credential(credential_id):
-    """查看密码"""
+    """查看密码 — requires password_view_token from re-authentication"""
     try:
+        data = request.get_json(silent=True) or {}
+        view_token = data.get('view_token')
+
+        if not view_token:
+            return jsonify({'code': 401, 'message': '需要二次认证，请先验证密码'}), 401
+
+        token_info = verify_password_view_token(view_token, credential_id)
+        if not token_info:
+            return jsonify({'code': 401, 'message': '二次认证Token无效或已过期'}), 401
+
         credential = Credential.query.get(credential_id)
         if not credential:
             return jsonify({'code': 404, 'message': 'Credential not found'}), 404
@@ -692,3 +703,99 @@ def check_connectivity():
     except Exception as e:
         logger.error("[ERROR] Check connectivity failed", exc_info=True)
         return jsonify({'code': 500, 'message': str(e)}), 500
+
+_batch_tasks = {}  # task_id -> result dict
+
+@asset_bp.route('/batch/test', methods=['POST'])
+@token_required
+@role_required('admin', 'operator')
+def batch_test_connectivity():
+    """Batch connectivity test — async, returns task_id for polling."""
+    import uuid
+    import threading
+
+    data = request.get_json()
+    asset_ids = data.get('asset_ids', [])
+    if not asset_ids:
+        return jsonify({'code': 400, 'message': 'asset_ids is required'}), 400
+
+    task_id = uuid.uuid4().hex[:12]
+    _batch_tasks[task_id] = {'status': 'running', 'results': [], 'total': len(asset_ids), 'done': 0}
+
+    def _run():
+        with current_app.app_context():
+            for aid in asset_ids:
+                try:
+                    asset = Asset.query.get(aid)
+                    if not asset:
+                        _batch_tasks[task_id]['results'].append({'asset_id': aid, 'status': 'not_found'})
+                        _batch_tasks[task_id]['done'] += 1
+                        continue
+                    credential = max(asset.credentials, key=lambda c: c.id) if asset.credentials else None
+                    if not credential:
+                        _batch_tasks[task_id]['results'].append({'asset_id': aid, 'ip': asset.ip, 'status': 'no_credential'})
+                        _batch_tasks[task_id]['done'] += 1
+                        continue
+                    password = CryptoService.sm4_decrypt(credential.encrypted_password, credential.key_version)
+                    if password is None:
+                        _batch_tasks[task_id]['results'].append({'asset_id': aid, 'ip': asset.ip, 'status': 'decrypt_failed'})
+                        _batch_tasks[task_id]['done'] += 1
+                        continue
+                    from app.services.connection_tester import test_connection
+                    result = test_connection(asset_type=asset.os_type, host=asset.ip,
+                                             port=asset.ssh_port, username=credential.account_name,
+                                             password=password)
+                    asset.connectivity = 'online' if result['success'] else 'offline'
+                    asset.last_check_time = datetime.now()
+                    db.session.commit()
+                    _batch_tasks[task_id]['results'].append({
+                        'asset_id': aid, 'ip': asset.ip, 'status': 'online' if result['success'] else 'offline',
+                        'message': result.get('message', '')
+                    })
+                except Exception as e:
+                    _batch_tasks[task_id]['results'].append({'asset_id': aid, 'status': 'error', 'message': str(e)[:200]})
+                _batch_tasks[task_id]['done'] += 1
+        _batch_tasks[task_id]['status'] = 'completed'
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+    return jsonify({'code': 200, 'message': '批量检测已启动', 'data': {'task_id': task_id}})
+
+
+@asset_bp.route('/batch/result/<task_id>', methods=['GET'])
+@token_required
+def get_batch_result(task_id):
+    """Poll batch task result."""
+    task = _batch_tasks.get(task_id)
+    if not task:
+        return jsonify({'code': 404, 'message': 'Task not found'}), 404
+    return jsonify({'code': 200, 'data': task})
+
+
+@asset_bp.route('/batch/rotate', methods=['POST'])
+@token_required
+@role_required('admin')
+def batch_rotate_passwords():
+    """Batch password rotation — serial execution, returns per-asset results."""
+    from app.services.password_rotation import rotate_password
+
+    data = request.get_json()
+    asset_ids = data.get('asset_ids', [])
+    if not asset_ids:
+        return jsonify({'code': 400, 'message': 'asset_ids is required'}), 400
+
+    results = []
+    for aid in asset_ids:
+        try:
+            rotate_password(aid)
+            results.append({'asset_id': aid, 'status': 'success'})
+        except Exception as e:
+            results.append({'asset_id': aid, 'status': 'failed', 'message': str(e)[:200]})
+
+    success_count = sum(1 for r in results if r['status'] == 'success')
+    return jsonify({
+        'code': 200,
+        'message': f'批量改密完成: {success_count}/{len(asset_ids)} 成功',
+        'data': {'results': results}
+    })

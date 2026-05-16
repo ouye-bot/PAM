@@ -12,6 +12,7 @@ from app.models import Asset, Credential, SessionRecord, User
 from app.services.crypto_service import CryptoService
 from app.services.audit_service import write_audit_log
 from app.services.command_interceptor import intercept_command
+from app.services.recording_service import start_recording, write_recording_header, append_recording_frame, cleanup_recording
 from app.utils.auth import verify_token
 from flask import request, current_app
 from dotenv import load_dotenv
@@ -21,11 +22,6 @@ logger = get_logger('app.routes.ssh')
 
 # 加载环境变量
 load_dotenv()
-
-# 确保recordings目录存在
-recordings_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'recordings')
-if not os.path.exists(recordings_dir):
-    os.makedirs(recordings_dir)
 
 # 存储活动的SSH连接
 active_connections = {}
@@ -71,28 +67,6 @@ def handle_disconnect():
     except Exception:
         pass
 
-def _encrypt_recording_file(session_record):
-    import struct
-    plaintext_path = session_record.recording_path
-    if not plaintext_path or not os.path.exists(plaintext_path):
-        return
-    if not plaintext_path.endswith('.cast'):
-        return
-    enc_path = plaintext_path + '.enc'
-    with open(plaintext_path, 'rb') as f:
-        plaintext = f.read()
-    dek = os.urandom(16)
-    iv, ciphertext = CryptoService.sm4_cbc_encrypt_bytes(plaintext, dek)
-    encrypted_dek = CryptoService.encrypt_dek_with_master_key(dek)
-    with open(enc_path, 'wb') as f:
-        f.write(struct.pack('>I', len(encrypted_dek)))
-        f.write(encrypted_dek)
-        f.write(iv)
-        f.write(ciphertext)
-    os.remove(plaintext_path)
-    session_record.recording_path = enc_path
-    db.session.commit()
-
 def cleanup_connection(sid):
     """清理指定sid的连接"""
     to_remove = []
@@ -106,15 +80,13 @@ def cleanup_connection(sid):
                 conn_info['channel'].close()
             if conn_info.get('client'):
                 conn_info['client'].close()
-            if conn_info.get('recording_file'):
-                conn_info['recording_file'].close()
             del active_connections[session_id]
             session_record = SessionRecord.query.filter_by(session_id=session_id).first()
             if session_record:
                 session_record.end_time = datetime.now()
                 db.session.commit()
                 try:
-                    _encrypt_recording_file(session_record)
+                    cleanup_recording(conn_info.get('recording_file'), session_record)
                 except Exception as enc_err:
                     current_app.logger.critical('[SSH WS] 录像加密失败，保留明文文件: %s', enc_err)
             current_app.logger.info(f'[SSH WS] Cleaned up session: {session_id}')
@@ -261,23 +233,10 @@ def handle_ssh_connect(data):
         import gc
         gc.collect()
 
-        # 创建录像文件
-        recording_filename = f"{asset_id}_{decoded.get('user_id')}_{session_id}.cast"
-        recording_path = os.path.join(recordings_dir, recording_filename)
-        recording_file = open(recording_path, 'w', encoding='utf-8')
-
-        # 写入asciinema cast v2格式头部
+        # 创建录像文件并写入asciinema cast v2格式头部
+        recording_file, recording_path = start_recording(asset_id, decoded.get('user_id'), session_id)
         initial_timestamp = time.time()
-        cast_header = {
-            "version": 2,
-            "width": 120,
-            "height": 40,
-            "timestamp": int(initial_timestamp)
-        }
-        import json
-        header_line = json.dumps(cast_header, separators=(',', ':')) + '\n'
-        recording_file.write(header_line)
-        recording_file.flush()
+        write_recording_header(recording_file, 120, 40, initial_timestamp)
 
         # 存储连接信息
         active_connections[session_id] = {
@@ -346,13 +305,8 @@ def handle_ssh_connect(data):
                 current_app.logger.info(f'[WebSSH] Initial output received, length={len(initial_output_str)}')
                 socketio.emit('ssh_output', {'output': initial_output_str}, room=request.sid)
                 # 写入asciinema格式
-                import json
                 time_diff = round(time.time() - initial_timestamp, 6)
-                # 使用 json.dumps 自动转义输出内容
-                output_data = [time_diff, initial_output_str]
-                line = json.dumps(output_data, separators=(',', ':'), ensure_ascii=False) + '\n'
-                recording_file.write(line)
-                recording_file.flush()
+                append_recording_frame(recording_file, initial_output_str, time_diff)
             else:
                 current_app.logger.info(f'[WebSSH] No initial output received, sending prompt')
                 # 发送一个空的输出以触发前端显示提示符
@@ -566,14 +520,9 @@ def read_ssh_output(session_id):
                     socketio.emit('ssh_output', {'output': output}, room=conn_info['sid'])
 
                     # 写入asciinema格式
-                    import json
                     initial_timestamp = conn_info.get('initial_timestamp', time.time())
                     time_diff = round(time.time() - initial_timestamp, 6)
-                    # 使用 json.dumps 自动转义输出内容
-                    output_data = [time_diff, output]
-                    line = json.dumps(output_data, separators=(',', ':'), ensure_ascii=False) + '\n'
-                    conn_info['recording_file'].write(line)
-                    conn_info['recording_file'].flush()
+                    append_recording_frame(conn_info['recording_file'], output, time_diff)
             else:
                 time.sleep(0.01)
         except Exception as e:

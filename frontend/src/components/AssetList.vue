@@ -21,7 +21,9 @@
         border
         stripe
         v-loading="loading"
+        @selection-change="handleSelectionChange"
       >
+        <el-table-column type="selection" width="50" />
         <el-table-column prop="ip" label="IP地址" width="150" />
         <el-table-column prop="hostname" label="主机名" width="150" />
         <el-table-column prop="os_type" label="系统类型" width="130">
@@ -60,7 +62,7 @@
               v-if="['admin', 'operator'].includes(role)"
               type="info"
               link
-              @click="viewPassword(scope.row)"
+              @click="requestPasswordView(scope.row.id, scope.row.credentials[0]?.id)"
               :loading="scope.row._viewing"
               :disabled="scope.row.credentials.length === 0"
             >
@@ -131,6 +133,13 @@
           </template>
         </el-table-column>
       </el-table>
+
+      <!-- Batch action bar -->
+      <div v-if="selectedAssets.length > 0" style="margin-top: 12px; display: flex; gap: 8px; align-items: center;">
+        <span>已选 {{ selectedAssets.length }} 个资产</span>
+        <el-button type="primary" :loading="batchTesting" @click="batchTest">批量检测连通性</el-button>
+        <el-button v-if="role === 'admin'" type="warning" :loading="batchRotating" @click="batchRotate">批量改密</el-button>
+      </div>
     </el-card>
 
     <!-- 添加资产对话框 -->
@@ -486,6 +495,17 @@
         <el-button @click="passwordDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- Re-auth Dialog for password viewing -->
+    <el-dialog v-model="reAuthVisible" title="身份验证" width="400px" :close-on-click-modal="false">
+      <p style="margin-bottom: 16px;">查看密码需要验证您的身份，请输入当前登录密码</p>
+      <el-input v-model="reAuthPassword" type="password" placeholder="请输入当前密码" show-password
+                @keyup.enter="confirmReAuth" />
+      <template #footer>
+        <el-button @click="reAuthVisible = false">取消</el-button>
+        <el-button type="primary" :loading="reAuthLoading" @click="confirmReAuth">确认</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -505,6 +525,9 @@ const router = useRouter()
 
 const assets = ref([])
 const loading = ref(false)
+const selectedAssets = ref([])
+const batchTesting = ref(false)
+const batchRotating = ref(false)
 const addDialogVisible = ref(false)
 const addLoading = ref(false)
 const addFormRef = ref(null)
@@ -581,6 +604,11 @@ const sshDialogKey = ref(0)
 
 const passwordDialogVisible = ref(false)
 const passwordFieldVisible = ref(false)
+const reAuthVisible = ref(false)
+const reAuthPassword = ref('')
+const reAuthLoading = ref(false)
+const pendingViewAssetId = ref(null)
+const pendingViewCredentialId = ref(null)
 const passwordData = ref({
   ip: '',
   ssh_port: 22,
@@ -1002,6 +1030,41 @@ const viewPassword = async (asset) => {
   }
 }
 
+const requestPasswordView = (assetId, credentialId) => {
+  pendingViewAssetId.value = assetId
+  pendingViewCredentialId.value = credentialId
+  reAuthPassword.value = ''
+  reAuthVisible.value = true
+}
+
+const confirmReAuth = async () => {
+  reAuthLoading.value = true
+  try {
+    const verifyRes = await request.post('/api/auth/verify-password', { password: reAuthPassword.value })
+    if (!verifyRes.valid) {
+      ElMessage.error('密码错误')
+      return
+    }
+    const tokenRes = await request.post('/api/auth/password-view-token', {
+      asset_id: pendingViewAssetId.value,
+      credential_id: pendingViewCredentialId.value
+    })
+    if (tokenRes.code !== 200) {
+      ElMessage.error(tokenRes.message || '获取查看Token失败')
+      return
+    }
+    const viewRes = await request.post(`/api/assets/credentials/${pendingViewCredentialId.value}/view`, {
+      view_token: tokenRes.data.view_token
+    })
+    if (viewRes.code === 200) {
+      ElMessage.success(`密码: ${viewRes.password}`)
+    }
+  } finally {
+    reAuthLoading.value = false
+    reAuthVisible.value = false
+  }
+}
+
 const openWebSSH = (asset) => {
   selectedAssetId.value = asset.id
   selectedAssetName.value = `${asset.ip}:${asset.ssh_port}`
@@ -1070,6 +1133,49 @@ const handleCopyTokenCommand = () => {
     navigator.clipboard.writeText(tokenData.value.connectCommand)
       .then(() => ElMessage.success('连接命令已复制'))
       .catch(() => ElMessage.error('复制失败'))
+  }
+}
+
+const handleSelectionChange = (selection) => {
+  selectedAssets.value = selection
+}
+
+const batchTest = async () => {
+  batchTesting.value = true
+  try {
+    const ids = selectedAssets.value.map(a => a.id)
+    const res = await request.post('/api/assets/batch/test', { asset_ids: ids })
+    if (res.code === 200) {
+      const taskId = res.data.task_id
+      const poll = setInterval(async () => {
+        const r = await request.get(`/api/assets/batch/result/${taskId}`)
+        if (r.data.status === 'completed') {
+          clearInterval(poll)
+          const online = r.data.results.filter(x => x.status === 'online').length
+          ElMessage.success(`检测完成: ${online}/${r.data.total} 在线`)
+          getAssets()
+        }
+      }, 2000)
+    }
+  } finally {
+    batchTesting.value = false
+  }
+}
+
+const batchRotate = async () => {
+  await ElMessageBox.confirm(
+    `确认为选中的 ${selectedAssets.value.length} 个资产执行改密？`,
+    '批量改密确认',
+    { type: 'warning' }
+  )
+  batchRotating.value = true
+  try {
+    const ids = selectedAssets.value.map(a => a.id)
+    const res = await request.post('/api/assets/batch/rotate', { asset_ids: ids })
+    ElMessage.success(res.message)
+    getAssets()
+  } finally {
+    batchRotating.value = false
   }
 }
 
