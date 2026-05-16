@@ -1,0 +1,36 @@
+# Environment files (contain real secrets)
+.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+
+# Logs
+logs/
+*.log
+
+# Recordings (may contain sensitive session data)
+recordings/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Docker volumes
+docker/data/
+
+# OS
+Thumbs.db
