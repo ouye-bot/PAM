@@ -4,7 +4,7 @@
       <template #header>
         <div class="card-header">
           <h2>国密合规自检报告</h2>
-          <el-button type="primary" @click="loadReport" :loading="loading">
+          <el-button type="primary" @click="loadReport()" :loading="loading">
             刷新报告
           </el-button>
         </div>
@@ -35,6 +35,16 @@
             <div class="check-detail">{{ check.detail }}</div>
           </div>
         </div>
+
+        <div v-if="totalChecks > pageSize" class="pagination-wrapper">
+          <el-pagination
+            v-model:current-page="currentPage"
+            :page-size="pageSize"
+            :total="totalChecks"
+            layout="prev, pager, next"
+            @current-change="handlePageChange"
+          />
+        </div>
       </div>
 
       <div v-else-if="!loading" class="empty-state">
@@ -50,6 +60,9 @@ import request from '../utils/request'
 
 const loading = ref(false)
 const report = ref(null)
+const currentPage = ref(1)
+const pageSize = ref(10)
+const totalChecks = ref(0)
 
 const gradeClass = computed(() => {
   if (!report.value) return ''
@@ -81,18 +94,24 @@ const statusText = (status) => {
   return '未通过'
 }
 
-const loadReport = async () => {
+const loadReport = async (page = 1) => {
   loading.value = true
+  currentPage.value = page
   try {
-    const res = await request.get('/compliance/report')
+    const res = await request.get(`/compliance/report?page=${page}&size=${pageSize.value}`)
     if (res.code === 200) {
       report.value = res.data
+      totalChecks.value = res.data.total || 0
     }
   } catch (err) {
     console.error('获取合规报告失败:', err)
   } finally {
     loading.value = false
   }
+}
+
+const handlePageChange = (page) => {
+  loadReport(page)
 }
 </script>
 
@@ -199,5 +218,11 @@ const loadReport = async () => {
 
 .empty-state {
   padding: 60px 0;
+}
+
+.pagination-wrapper {
+  display: flex;
+  justify-content: center;
+  padding: 20px 0 0;
 }
 </style>
