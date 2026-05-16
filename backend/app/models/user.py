@@ -14,3 +14,8 @@ class User(db.Model):
     sm2_recovery_hashes = db.Column(db.JSON, nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.now)
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+    # P5-B1: 账户锁定
+    failed_login_attempts = db.Column(db.Integer, default=0)
+    locked_until = db.Column(db.DateTime, nullable=True)
+    # P5-B2: JWT Token 版本号
+    token_version = db.Column(db.Integer, default=0)

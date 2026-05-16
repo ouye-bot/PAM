@@ -47,7 +47,7 @@ with app.app_context():
                 error_count += 1
                 continue
             
-            credential = asset.credentials[0]
+            credential = max(asset.credentials, key=lambda c: c.id)
             
             # 测试SSH连接
             client = paramiko.SSHClient()

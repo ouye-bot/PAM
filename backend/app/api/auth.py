@@ -23,6 +23,32 @@ _sm2_challenges = {}
 _sm2_verify_attempts = {}
 
 
+def _generate_sm2_keypair(password, username, client_ip):
+    """生成SM2密钥对，用登录密码加密私钥。返回 (public_key_hex, encrypted_private_key_b64) 或 (None, None)。"""
+    try:
+        from gmssl import sm2 as gmssl_sm2
+        from app.services.crypto_service import secure_random_hex
+        from gmssl.sm4 import CryptSM4, SM4_ENCRYPT
+
+        private_key_hex = secure_random_hex(32)
+        sm2_crypt = gmssl_sm2.CryptSM2(private_key=private_key_hex, public_key='')
+        public_key_hex = sm2_crypt._kg(int(private_key_hex, 16), gmssl_sm2.default_ecc_table['g'])
+
+        salt = os.urandom(16)
+        derived = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000, dklen=32)
+        iv = os.urandom(16)
+        sm4_cipher = CryptSM4()
+        sm4_cipher.set_key(derived, SM4_ENCRYPT)
+        ciphertext = sm4_cipher.crypt_cbc(iv, private_key_hex.encode())
+        encrypted_key = salt + iv + ciphertext
+
+        return public_key_hex, base64.b64encode(encrypted_key).decode('utf-8')
+    except Exception as e:
+        write_audit_log('SM2_KEY_GEN_FAILED', operator=username, source_ip=client_ip,
+                        target_asset='login', operation_detail=f'SM2密钥生成失败: {str(e)[:100]}', result='failed')
+        return None, None
+
+
 def generate_temp_token(user_id, username):
     """生成临时Token"""
     temp_token = str(uuid.uuid4())
@@ -112,9 +138,37 @@ def login():
 
     user = User.query.filter_by(username=username).first()
 
+    # B1: 账户锁定检查
+    if user and user.locked_until:
+        from datetime import datetime
+        if datetime.now() < user.locked_until:
+            remaining = int((user.locked_until - datetime.now()).total_seconds() / 60) + 1
+            write_audit_log('LOGIN_LOCKED', operator=username, source_ip=client_ip, target_asset='login',
+                            operation_detail=f'账户已锁定，剩余{remaining}分钟', result='failed')
+            return jsonify({'code': 423, 'message': f'账户已锁定，请{remaining}分钟后重试'}), 423
+        else:
+            # 锁定已过期，重置
+            user.failed_login_attempts = 0
+            user.locked_until = None
+            db.session.commit()
+
     if not user or not verify_password(password, user.password):
-        # Rate limiting for failed logins is handled globally by rate_limit_middleware
+        # B1: 登录失败计数
+        if user:
+            user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+            if user.failed_login_attempts >= 5:
+                from datetime import datetime, timedelta
+                user.locked_until = datetime.now() + timedelta(minutes=15)
+                write_audit_log('ACCOUNT_LOCKED', operator=username, source_ip=client_ip, target_asset='login',
+                                operation_detail=f'连续{user.failed_login_attempts}次登录失败，锁定15分钟', result='failed')
+            db.session.commit()
         return jsonify({'code': 401, 'message': '用户名或密码错误'}), 401
+
+    # B1: 登录成功，重置失败计数
+    if user.failed_login_attempts:
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        db.session.commit()
 
 
 
@@ -122,12 +176,23 @@ def login():
     sm2_token = data.get('sm2_token', '')
     sm2_signature = data.get('signature', '')
 
+    sm2_auto_generated = False
+    encrypted_private_key = None
+
     if user.sm2_public_key:
         if not sm2_available:
-            write_audit_log('SM2_LOGIN_MISSING', operator=user.username, source_ip=client_ip, target_asset='login', operation_detail='当前设备未绑定SM2私钥', result='failed')
-            return jsonify({'code': 401, 'message': "当前设备未绑定SM2私钥，请选择'设备丢失/重新绑定'"}), 401
+            # 客户端无SM2私钥（新设备/清除了localStorage），自动重新生成密钥对
+            public_key_hex, encrypted_private_key = _generate_sm2_keypair(password, user.username, client_ip)
+            if public_key_hex:
+                user.sm2_public_key = public_key_hex
+                db.session.commit()
+                sm2_auto_generated = True
+                write_audit_log('SM2_KEY_REGENERATED', operator=user.username, source_ip=client_ip,
+                                target_asset='login', operation_detail='设备无SM2私钥，自动重新生成密钥对', result='success')
+            else:
+                return jsonify({'code': 500, 'message': 'SM2密钥生成失败，请稍后重试'}), 500
 
-        if not sm2_token or not sm2_signature:
+        elif not sm2_token or not sm2_signature:
             sm2_token_new, challenge = generate_sm2_challenge(user.id, client_ip)
             return jsonify({
                 'code': 200,
@@ -136,61 +201,36 @@ def login():
                 'challenge': challenge
             })
 
-        challenge_info = _sm2_challenges.pop(sm2_token, None)
-        if not challenge_info:
-            return jsonify({'code': 401, 'message': 'SM2验证会话已过期，请重新登录'}), 401
+        else:
+            # SM2签名验证
+            challenge_info = _sm2_challenges.pop(sm2_token, None)
+            if not challenge_info:
+                return jsonify({'code': 401, 'message': 'SM2验证会话已过期，请重新登录'}), 401
 
-        if challenge_info['client_ip'] != client_ip:
-            write_audit_log('SM2_LOGIN_FAIL', operator=user.username, source_ip=client_ip, target_asset='login', operation_detail='SM2验签失败：IP不匹配', result='failed')
-            return jsonify({'code': 401, 'message': 'SM2验证失败：IP不匹配'}), 401
+            if challenge_info['client_ip'] != client_ip:
+                write_audit_log('SM2_LOGIN_FAIL', operator=user.username, source_ip=client_ip, target_asset='login', operation_detail='SM2验签失败：IP不匹配', result='failed')
+                return jsonify({'code': 401, 'message': 'SM2验证失败：IP不匹配'}), 401
 
-        if time.time() > challenge_info['expires_at']:
-            write_audit_log('SM2_LOGIN_FAIL', operator=user.username, source_ip=client_ip, target_asset='login', operation_detail='SM2验签失败：挑战码过期', result='failed')
-            return jsonify({'code': 401, 'message': 'SM2验证已过期，请重新登录'}), 401
+            if time.time() > challenge_info['expires_at']:
+                write_audit_log('SM2_LOGIN_FAIL', operator=user.username, source_ip=client_ip, target_asset='login', operation_detail='SM2验签失败：挑战码过期', result='failed')
+                return jsonify({'code': 401, 'message': 'SM2验证已过期，请重新登录'}), 401
 
-        challenge = challenge_info['challenge']
-        valid = CryptoService.sm2_verify_with_public_key(challenge, sm2_signature, user.sm2_public_key)
-        if not valid:
-            write_audit_log('SM2_LOGIN_FAIL', operator=user.username, source_ip=client_ip, target_asset='login', operation_detail='SM2验签失败：签名验证不通过', result='failed')
-            return jsonify({'code': 401, 'message': 'SM2验证失败'}), 401
+            challenge = challenge_info['challenge']
+            valid = CryptoService.sm2_verify_with_public_key(challenge, sm2_signature, user.sm2_public_key)
+            if not valid:
+                write_audit_log('SM2_LOGIN_FAIL', operator=user.username, source_ip=client_ip, target_asset='login', operation_detail='SM2验签失败：签名验证不通过', result='failed')
+                return jsonify({'code': 401, 'message': 'SM2验证失败'}), 401
 
-        write_audit_log('SM2_LOGIN_SUCCESS', operator=user.username, source_ip=client_ip, target_asset='login', operation_detail='SM2静默认证通过', result='success')
+            write_audit_log('SM2_LOGIN_SUCCESS', operator=user.username, source_ip=client_ip, target_asset='login', operation_detail='SM2静默认证通过', result='success')
     else:
         # 首次登录：自动生成 SM2 密钥对，用登录密码加密私钥
-        sm2_auto_generated = False
-        encrypted_private_key = None
-
-        try:
-            from gmssl import sm2 as gmssl_sm2, func
-            from app.services.crypto_service import CryptoService
-
-            # 生成 SM2 密钥对（使用密码学安全随机数）
-            from app.services.crypto_service import secure_random_hex
-            private_key_hex = secure_random_hex(32)
-            sm2_crypt = gmssl_sm2.CryptSM2(private_key=private_key_hex, public_key='')
-            public_key_hex = sm2_crypt._kg(int(private_key_hex, 16), gmssl_sm2.default_ecc_table['g'])
-
-            # 用登录密码派生加密密钥 (PBKDF2 → SM4加密私钥)
-            from gmssl.sm4 import CryptSM4, SM4_ENCRYPT
-            salt = os.urandom(16)
-            derived = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, 100000, dklen=32)
-            iv = os.urandom(16)
-            sm4_cipher = CryptSM4()
-            sm4_cipher.set_key(derived, SM4_ENCRYPT)
-            ciphertext = sm4_cipher.crypt_cbc(iv, private_key_hex.encode())
-            encrypted_key = salt + iv + ciphertext
-
-            # 保存公钥
+        public_key_hex, encrypted_private_key = _generate_sm2_keypair(password, user.username, client_ip)
+        if public_key_hex:
             user.sm2_public_key = public_key_hex
             db.session.commit()
-
-            encrypted_private_key = base64.b64encode(encrypted_key).decode('utf-8')
             sm2_auto_generated = True
             write_audit_log('SM2_KEY_AUTO_GENERATED', operator=user.username, source_ip=client_ip,
-                          target_asset='login', operation_detail='首次登录自动生成SM2密钥对', result='success')
-        except Exception as e:
-            write_audit_log('SM2_KEY_AUTO_GEN_FAILED', operator=user.username, source_ip=client_ip,
-                          target_asset='login', operation_detail=f'SM2自动生成失败: {str(e)[:100]}', result='failed')
+                            target_asset='login', operation_detail='首次登录自动生成SM2密钥对', result='success')
 
     if user.totp_enabled:
         temp_token = generate_temp_token(user.id, user.username)
@@ -204,7 +244,7 @@ def login():
             resp['encrypted_private_key'] = encrypted_private_key
         return jsonify(resp)
     else:
-        token = generate_token(user.id, user.username, user.role, login_ip=client_ip)
+        token = generate_token(user.id, user.username, user.role, login_ip=client_ip, token_version=user.token_version or 0)
         resp = {
             'code': 200,
             'token': token,
@@ -452,7 +492,7 @@ def mfa_login():
         }), 401
     
     # 生成正式JWT Token
-    token = generate_token(user.id, user.username, user.role, login_ip=request.remote_addr)
+    token = generate_token(user.id, user.username, user.role, login_ip=request.remote_addr, token_version=user.token_version or 0)
     
     # 构建响应
     response_data = {
@@ -524,7 +564,7 @@ def sm2_verify():
             }
         })
     else:
-        token = generate_token(user.id, user.username, user.role, login_ip=client_ip)
+        token = generate_token(user.id, user.username, user.role, login_ip=client_ip, token_version=user.token_version or 0)
         return jsonify({
             'code': 200,
             'token': token,

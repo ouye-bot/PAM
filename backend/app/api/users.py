@@ -38,8 +38,8 @@ def create_user():
     if not username or len(username) < 3 or len(username) > 32:
         return jsonify({'code': 422, 'message': '用户名长度需为3-32个字符'}), 422
 
-    if not password or len(password) < 6:
-        return jsonify({'code': 422, 'message': '密码长度不能少于6位'}), 422
+    if not password or len(password) < 8:
+        return jsonify({'code': 422, 'message': '密码长度不能少于8位'}), 422
 
     if role not in ALLOWED_ROLES:
         return jsonify({'code': 422, 'message': f'角色必须是 {", ".join(ALLOWED_ROLES)}'}), 422
@@ -167,10 +167,11 @@ def reset_password(user_id):
         return jsonify({'code': 400, 'message': '新密码不能为空'}), 400
 
     new_password = data['new_password']
-    if len(new_password) < 6:
-        return jsonify({'code': 422, 'message': '密码长度不能少于6位'}), 422
+    if len(new_password) < 8:
+        return jsonify({'code': 422, 'message': '密码长度不能少于8位'}), 422
 
     user.password = hash_password(new_password)
+    user.token_version = (user.token_version or 0) + 1
     db.session.commit()
 
     logger.info("Admin %s reset password for user %s", request.username, user.username)
@@ -193,8 +194,8 @@ def change_own_password():
     if not old_password or not new_password:
         return jsonify({'code': 400, 'message': '旧密码和新密码不能为空'}), 400
 
-    if len(new_password) < 6:
-        return jsonify({'code': 422, 'message': '新密码长度不能少于6位'}), 422
+    if len(new_password) < 8:
+        return jsonify({'code': 422, 'message': '新密码长度不能少于8位'}), 422
 
     user = User.query.get(request.user_id)
     if not user:
@@ -205,6 +206,7 @@ def change_own_password():
         return jsonify({'code': 400, 'message': '旧密码错误'}), 400
 
     user.password = hash_password(new_password)
+    user.token_version = (user.token_version or 0) + 1
     db.session.commit()
 
     logger.info("User %s changed own password", request.username)

@@ -134,10 +134,20 @@ def handle_ssh_connect(data):
             )
             return
         
-        # 这里应该添加资产访问权限检查
-        # 例如：检查用户是否有权访问该资产
-        # 简化处理：假设所有登录用户都有权访问所有资产
-        current_app.logger.info(f'[WebSSH] User {user} authorized to access asset {asset_id}')
+        # 资产级角色鉴权
+        user_role = decoded.get('role')
+        asset_obj = Asset.query.get(asset_id)
+        if not asset_obj:
+            emit('error', {'message': '资产不存在'})
+            return
+        allowed = [r.strip() for r in (asset_obj.allowed_roles or 'admin').split(',')]
+        if user_role not in allowed:
+            current_app.logger.warning(f'[WebSSH] User {user} (role={user_role}) denied access to asset {asset_id} (allowed={allowed})')
+            write_audit_log('WS_ACCESS_DENIED', operator=user, source_ip=request.remote_addr or 'unknown',
+                            target_asset=str(asset_id), operation_detail=f'角色{user_role}无权访问资产{asset_id}', result='failed')
+            emit('error', {'message': '无权访问该资产'})
+            return
+        current_app.logger.info(f'[WebSSH] User {user} (role={user_role}) authorized to access asset {asset_id}')
     except Exception as e:
         current_app.logger.error(f'[WebSSH] Authorization failed: {str(e)}')
         emit('error', {'message': 'Unauthorized access'})
@@ -149,7 +159,7 @@ def handle_ssh_connect(data):
         credential = Credential.query.join(Asset).filter(
             Asset.id == asset_id,
             Credential.account_name == username
-        ).first()
+        ).order_by(Credential.id.desc()).first()
 
         if not credential:
             current_app.logger.error(f'[WebSSH] Credential not found for asset_id: {asset_id}, username: {username}')

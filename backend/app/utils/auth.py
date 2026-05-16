@@ -30,20 +30,17 @@ def verify_token(token):
     if token and '.' in token and len(token.split('.')) == 2:
         try:
             payload_b64, signature_b64 = token.split('.')
-            # 解码签名
             signature = base64.urlsafe_b64decode(signature_b64 + '==').decode()
-            # 验证签名
             if sm2_verify(payload_b64, signature):
-                # 解码payload
                 payload_json = base64.urlsafe_b64decode(payload_b64 + '==').decode()
                 payload = json.loads(payload_json)
-                # 检查过期时间
                 if payload.get('exp', 0) >= time.time():
                     return payload
+                return None  # SM2 Token 过期
         except Exception:
-            pass
-    
-    # 2. 降级为原有HMAC-SHA256 JWT验证
+            pass  # 非 SM2 Token 格式，尝试 HS256
+
+    # 2. HS256 JWT 验证（仅用于非 SM2 格式的 Token）
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         return payload
@@ -83,6 +80,15 @@ def token_required(f):
                 'message': 'Token无效或已过期'
             }), 401
 
+        # B2: 验证 token_version（改密/重置后旧Token失效）
+        from app.models import User
+        user = User.query.get(payload.get('user_id'))
+        if user and payload.get('token_version', 0) != user.token_version:
+            return jsonify({
+                'code': 401,
+                'message': 'Token已失效，请重新登录'
+            }), 401
+
         # 注入用户信息到request对象
         request.user_id = payload.get('user_id')
         request.username = payload.get('username')
@@ -118,7 +124,7 @@ def role_required(*allowed_roles):
     return decorator
 
 
-def generate_token(user_id, username, role='admin', login_ip=None):
+def generate_token(user_id, username, role='admin', login_ip=None, token_version=0):
     """
     生成SM2签名的Token
     """
@@ -126,6 +132,7 @@ def generate_token(user_id, username, role='admin', login_ip=None):
         'user_id': user_id,
         'username': username,
         'role': role,
+        'token_version': token_version,
         'exp': int(time.time()) + 86400  # 24小时
     }
     if login_ip:

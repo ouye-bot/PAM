@@ -99,7 +99,7 @@ def trigger_bypass_detection():
         traceback.print_exc()
         return jsonify({
             'code': 500,
-            'message': f"触发检测失败: {str(e)}"
+            'message': '触发检测失败，请稍后重试'
         })
 
 

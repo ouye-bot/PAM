@@ -33,7 +33,7 @@ def get_policy():
         })
     except Exception as e:
         logger.error(f"[GET /api/system/policy] Error: {str(e)}", exc_info=True)
-        return jsonify({'code': 500, 'message': str(e)}), 500
+        return jsonify({'code': 500, 'message': '操作失败，请稍后重试'}), 500
 
 @system_bp.route('/policy', methods=['POST'])
 @token_required
@@ -79,4 +79,4 @@ def update_policy():
     except Exception as e:
         db.session.rollback()
         logger.error(f"[POST /api/system/policy] Error: {str(e)}", exc_info=True)
-        return jsonify({'code': 500, 'message': str(e)}), 500
+        return jsonify({'code': 500, 'message': '操作失败，请稍后重试'}), 500

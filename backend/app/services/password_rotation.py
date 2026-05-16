@@ -160,19 +160,26 @@ def _mysql_verify(host, port, user, password, timeout=10):
 
 
 def _mysql_alter_user(host, port, user, password, target_user, new_password):
-    """执行MySQL ALTER USER改密（使用参数化查询防SQL注入）"""
+    """执行MySQL ALTER USER改密"""
     conn = pymysql.connect(
         host=host, port=port, user=user, password=password,
         connect_timeout=10, read_timeout=10
     )
-    # 转义单引号防止SQL注入
-    safe_user = target_user.replace("'", "''")
-    safe_pwd = new_password.replace("'", "''")
-    with conn.cursor() as cursor:
-        cursor.execute(f"ALTER USER '{safe_user}'@'%' IDENTIFIED WITH mysql_native_password BY '{safe_pwd}'")
-        cursor.execute(f"ALTER USER '{safe_user}'@'localhost' IDENTIFIED WITH mysql_native_password BY '{safe_pwd}'")
-        cursor.execute("FLUSH PRIVILEGES")
-    conn.close()
+    try:
+        safe_user = target_user.replace("'", "''")
+        safe_pwd = new_password.replace("'", "''")
+        with conn.cursor() as cursor:
+            # 先查询该用户实际存在的 host 条目
+            cursor.execute("SELECT DISTINCT host FROM mysql.user WHERE user = %s", (target_user,))
+            hosts = [row[0] for row in cursor.fetchall()]
+            if not hosts:
+                raise Exception(f"MySQL用户 '{target_user}' 不存在")
+            for h in hosts:
+                safe_host = h.replace("'", "''")
+                cursor.execute(f"ALTER USER '{safe_user}'@'{safe_host}' IDENTIFIED BY '{safe_pwd}'")
+            cursor.execute("FLUSH PRIVILEGES")
+    finally:
+        conn.close()
 
 
 def _rotate_mysql_password(asset, credential, active_key, current_password, old_password_hash, account_name, local_time):
@@ -628,11 +635,11 @@ def rotate_password(asset_id, account_name='root', operator='system'):
     credential = Credential.query.join(Asset).filter(
         Asset.id == asset_id,
         Credential.account_name == account_name
-    ).first()
+    ).order_by(Credential.id.desc()).first()
 
     if not credential:
-        logger.warning(f"[ROTATION] 资产 {asset_id} 未找到账号 {account_name}，尝试使用第一个可用凭证")
-        credential = Credential.query.filter_by(asset_id=asset_id).first()
+        logger.warning(f"[ROTATION] 资产 {asset_id} 未找到账号 {account_name}，尝试使用最新凭证")
+        credential = Credential.query.filter_by(asset_id=asset_id).order_by(Credential.id.desc()).first()
         if credential:
             account_name = credential.account_name
             logger.info(f"[ROTATION] 回退使用凭证账号: {account_name}")

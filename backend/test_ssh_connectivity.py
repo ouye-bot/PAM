@@ -44,7 +44,7 @@ with app.app_context():
             print("  无关联凭证，跳过测试")
             continue
         
-        credential = asset.credentials[0]
+        credential = max(asset.credentials, key=lambda c: c.id)
         print(f"  凭证账号: {credential.account_name}")
         
         # 测试SSH连接

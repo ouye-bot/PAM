@@ -112,12 +112,22 @@ def handle_winrm_connect(data):
         emit('error', {'message': 'Asset not found'}, room=request.sid)
         return
 
+    # 资产级角色鉴权
+    user_role = decoded.get('role')
+    allowed = [r.strip() for r in (asset.allowed_roles or 'admin').split(',')]
+    if user_role not in allowed:
+        current_app.logger.warning('[WINRM WS] User %s (role=%s) denied access to asset %s', decoded.get('username'), user_role, asset_id)
+        write_audit_log('WS_ACCESS_DENIED', operator=decoded.get('username', 'unknown'), source_ip=request.remote_addr or 'unknown',
+                        target_asset=str(asset_id), operation_detail=f'角色{user_role}无权访问资产{asset_id}', result='failed')
+        emit('error', {'message': '无权访问该资产'}, room=request.sid)
+        return
+
     if not asset.os_type or asset.os_type.lower() != 'windows':
         current_app.logger.error('[WINRM WS] Connection refused: Asset is not Windows type')
         emit('error', {'message': 'Asset is not Windows type'}, room=request.sid)
         return
 
-    credential = Credential.query.filter_by(asset_id=asset_id).first()
+    credential = Credential.query.filter_by(asset_id=asset_id).order_by(Credential.id.desc()).first()
     if not credential:
         current_app.logger.error('[WINRM WS] Connection refused: No credential found')
         emit('error', {'message': 'No credential configured for this asset'}, room=request.sid)

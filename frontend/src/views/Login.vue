@@ -308,6 +308,9 @@ const handleLogin = async () => {
 
       if (response.code === 200) {
         if (response.require_mfa) {
+          if (response.sm2_auto_configured && response.encrypted_private_key) {
+            localStorage.setItem('sm2_encrypted_private_key', response.encrypted_private_key)
+          }
           tempToken.value = response.temp_token
           showMFAStep.value = true
         } else if (response.require_sm2 && response.challenge) {
@@ -347,14 +350,27 @@ const handleLogin = async () => {
                 }
               }
             } else {
-              ElMessage.error(sm2Response.message || 'SM2认证失败')
+              // SM2验证失败（密钥可能已过期），清除旧密钥并重试
+              localStorage.removeItem('sm2_encrypted_private_key')
+              ElMessage.warning('SM2密钥已过期，正在重新认证...')
+              loading.value = false
+              await handleLogin()
+              return
             }
           } catch (error) {
-            ElMessage.error('SM2认证请求失败')
+            // SM2请求失败，清除旧密钥并重试
+            localStorage.removeItem('sm2_encrypted_private_key')
+            ElMessage.warning('SM2认证失败，正在重新认证...')
+            loading.value = false
+            await handleLogin()
+            return
           }
         } else {
           sessionStorage.setItem('token', response.token)
           sessionStorage.setItem('user', JSON.stringify(response.user))
+          if (response.sm2_auto_configured && response.encrypted_private_key) {
+            localStorage.setItem('sm2_encrypted_private_key', response.encrypted_private_key)
+          }
           ElMessage.success('登录成功')
           await autoSetupSm2Key(response.token, response.user?.id)
 

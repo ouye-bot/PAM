@@ -173,7 +173,7 @@ def rotate_key():
     except Exception as e:
         db.session.rollback()
         logger.error("[KEY-ROTATION] Rotation failed: %s", e)
-        return jsonify({'code': 500, 'message': f'密钥轮换失败: {str(e)}'}), 500
+        return jsonify({'code': 500, 'message': '密钥轮换失败，请稍后重试'}), 500
 
 
 @key_bp.route('/rotate-status', methods=['GET'])

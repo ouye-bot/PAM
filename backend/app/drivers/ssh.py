@@ -1,5 +1,6 @@
 """SSH/Linux资产驱动"""
 import paramiko
+import shlex
 import socket
 import time
 import hashlib
@@ -41,12 +42,12 @@ class SSHDriver(AssetDriver):
 
     def get_password_change_cmd(self, os_type, account_name, new_password):
         os_lower = (os_type or '').lower()
-        if os_lower in ['ubuntu', 'debian']:
-            return f"echo '{account_name}:{new_password}' | chpasswd\n"
-        elif os_lower in ['centos', 'rhel']:
-            return f"echo '{new_password}' | passwd --stdin {account_name}\n"
+        safe_account = shlex.quote(account_name)
+        safe_password = shlex.quote(new_password)
+        if os_lower in ['centos', 'rhel']:
+            return f"echo {safe_password} | passwd --stdin {safe_account}\n"
         else:
-            raise Exception(f"不支持的操作系统类型: {os_type}")
+            return f"echo {safe_account}:{safe_password} | chpasswd\n"
 
     def rotate_password(self, asset, credential, active_key, current_password,
                         old_password_hash, account_name, local_time):

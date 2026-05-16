@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify, current_app
 from datetime import datetime
 from app import db
-from app.models import Asset, Credential, AuditLog, RotationTask, SessionRecord
+from app.models import Asset, Credential, AuditLog, RotationTask, SessionRecord, BypassExemption
 from app.services.crypto_service import CryptoService
 from app.services.audit_service import write_audit_log
 from app.services.asset_scanner import scan_network
@@ -167,7 +167,7 @@ def add_asset():
     except Exception as e:
         db.session.rollback()
         logger.error(f"[ADD ASSET] Exception", exc_info=True)
-        return jsonify({'code': 500, 'message': str(e)}), 500
+        return jsonify({'code': 500, 'message': '操作失败，请稍后重试'}), 500
 
 @asset_bp.route('/credentials/<int:credential_id>/view', methods=['POST'])
 @token_required
@@ -236,7 +236,7 @@ def view_credential(credential_id):
         except:
             pass
 
-        return jsonify({'code': 500, 'message': str(e)}), 500
+        return jsonify({'code': 500, 'message': '操作失败，请稍后重试'}), 500
 
 @asset_bp.route('/<int:asset_id>', methods=['PUT'])
 @token_required
@@ -272,7 +272,7 @@ def update_asset(asset_id):
         return jsonify({'code': 200, 'message': f'资产更新成功，变更: {"; ".join(changes)}', 'data': asset.to_dict()})
     except Exception as e:
         db.session.rollback()
-        return jsonify({'code': 500, 'message': f'更新失败: {str(e)}'}), 500
+        return jsonify({'code': 500, 'message': '更新失败，请稍后重试'}), 500
 
 @asset_bp.route('/<int:asset_id>', methods=['DELETE'])
 @token_required
@@ -303,7 +303,7 @@ def delete_asset(asset_id):
     except Exception as e:
         db.session.rollback()
         logger.error(f"Delete asset failed", exc_info=True)
-        return jsonify({'code': 500, 'message': f'Delete failed: {str(e)}'}), 500
+        return jsonify({'code': 500, 'message': '删除失败，请稍后重试'}), 500
 
 @asset_bp.route('/deleted', methods=['GET'])
 @token_required
@@ -334,6 +334,15 @@ def restore_asset(asset_id):
         return jsonify({'code': 404, 'message': 'Asset not found'}), 404
     if asset.status != 'deleted':
         return jsonify({'code': 400, 'message': 'Asset is not deleted'}), 400
+    conflict = Asset.query.filter(
+        Asset.ip == asset.ip, Asset.ssh_port == asset.ssh_port,
+        Asset.status == 'active', Asset.id != asset.id
+    ).first()
+    if conflict:
+        return jsonify({
+            'code': 409,
+            'message': f'恢复失败：已存在相同IP和端口的活跃资产（ID: {conflict.id}, {conflict.hostname}）。请先删除冲突资产后再恢复。'
+        }), 409
     asset.status = 'active'
     db.session.commit()
     write_audit_log(
@@ -356,10 +365,20 @@ def batch_restore_assets():
     if not ids:
         return jsonify({'code': 400, 'message': 'No IDs provided'}), 400
     assets = Asset.query.filter(Asset.id.in_(ids), Asset.status == 'deleted').all()
+    conflicts = []
+    restored = []
     for asset in assets:
+        conflict = Asset.query.filter(
+            Asset.ip == asset.ip, Asset.ssh_port == asset.ssh_port,
+            Asset.status == 'active', Asset.id != asset.id
+        ).first()
+        if conflict:
+            conflicts.append(f'{asset.ip}:{asset.ssh_port} (冲突资产ID: {conflict.id})')
+            continue
         asset.status = 'active'
+        restored.append(asset)
     db.session.commit()
-    for asset in assets:
+    for asset in restored:
         write_audit_log(
             log_type='asset_restore',
             operator=request.username,
@@ -368,24 +387,38 @@ def batch_restore_assets():
             operation_detail=f'[批量恢复] 资产名称：{asset.hostname}',
             result='success'
         )
-    return jsonify({'code': 200, 'message': f'{len(assets)} assets restored successfully'})
+    msg = f'{len(restored)} 个资产恢复成功'
+    if conflicts:
+        msg += f'，{len(conflicts)} 个因冲突跳过：{"; ".join(conflicts)}'
+    return jsonify({'code': 200, 'message': msg})
 
 @asset_bp.route('/purge', methods=['DELETE'])
 @token_required
 @role_required('admin')
 def purge_assets():
     """彻底删除已删除的资产及其凭证"""
-    data = request.get_json()
-    ids = data.get('ids', [])
-    if not ids:
-        return jsonify({'code': 400, 'message': 'No IDs provided'}), 400
-    assets = Asset.query.filter(Asset.id.in_(ids), Asset.status == 'deleted').all()
-    for asset in assets:
-        Credential.query.filter_by(asset_id=asset.id).delete()
-        RotationTask.query.filter_by(asset_id=asset.id).delete()
-        db.session.delete(asset)
-    db.session.commit()
-    return jsonify({'code': 200, 'message': f'{len(assets)} assets permanently deleted'})
+    try:
+        data = request.get_json()
+        ids = data.get('ids', [])
+        if not ids:
+            return jsonify({'code': 400, 'message': 'No IDs provided'}), 400
+        assets = Asset.query.filter(Asset.id.in_(ids), Asset.status == 'deleted').all()
+        if not assets:
+            return jsonify({'code': 404, 'message': '未找到已删除的资产'}), 404
+        for asset in assets:
+            credential_ids = [c.id for c in Credential.query.filter_by(asset_id=asset.id).all()]
+            if credential_ids:
+                RotationTask.query.filter(RotationTask.credential_id.in_(credential_ids)).delete(synchronize_session=False)
+            SessionRecord.query.filter_by(asset_id=asset.id).delete()
+            BypassExemption.query.filter_by(asset_id=asset.id).delete()
+            Credential.query.filter_by(asset_id=asset.id).delete()
+            db.session.delete(asset)
+        db.session.commit()
+        return jsonify({'code': 200, 'message': f'{len(assets)} assets permanently deleted'})
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"[PURGE] 批量彻底删除失败: {str(e)}", exc_info=True)
+        return jsonify({'code': 500, 'message': '批量彻底删除失败，请稍后重试'}), 500
 
 @asset_bp.route('/discover', methods=['POST'])
 @token_required
@@ -418,7 +451,7 @@ def discover_assets():
         return jsonify({'code': 200, 'data': discovered})
     except Exception as e:
         logger.error("[ERROR] Asset discovery failed", exc_info=True)
-        return jsonify({'code': 500, 'message': str(e)}), 500
+        return jsonify({'code': 500, 'message': '操作失败，请稍后重试'}), 500
 
 @asset_bp.route('/<int:asset_id>/test', methods=['POST'])
 @token_required
@@ -496,7 +529,7 @@ def test_asset_connectivity(asset_id):
 
     except Exception as e:
         logger.error(f"[TEST] Asset connectivity test failed: {str(e)}", exc_info=True)
-        return jsonify({'code': 500, 'message': str(e)}), 500
+        return jsonify({'code': 500, 'message': '操作失败，请稍后重试'}), 500
 
 
 @asset_bp.route('/<int:asset_id>/diag-winrm', methods=['POST'])
@@ -511,7 +544,7 @@ def diag_winrm(asset_id):
         if not asset.os_type or asset.os_type.lower() != 'windows':
             return jsonify({'code': 400, 'message': 'Not a Windows asset'}), 400
 
-        credential = Credential.query.filter_by(asset_id=asset_id).first()
+        credential = Credential.query.filter_by(asset_id=asset_id).order_by(Credential.id.desc()).first()
         if not credential:
             return jsonify({'code': 404, 'message': 'No credential for this asset'}), 404
 
@@ -606,7 +639,7 @@ def diag_winrm(asset_id):
         return jsonify({'code': 200, 'data': result})
     except Exception as e:
         logger.error(f"[DIAG] WinRM diagnostic failed: {str(e)}", exc_info=True)
-        return jsonify({'code': 500, 'message': str(e)}), 500
+        return jsonify({'code': 500, 'message': '操作失败，请稍后重试'}), 500
 
 
 @asset_bp.route('/<int:asset_id>/update-password', methods=['POST'])
@@ -624,7 +657,7 @@ def update_asset_password(asset_id):
         if not new_password:
             return jsonify({'code': 400, 'message': 'new_password is required'}), 400
 
-        credential = Credential.query.filter_by(asset_id=asset_id).first()
+        credential = Credential.query.filter_by(asset_id=asset_id).order_by(Credential.id.desc()).first()
         if not credential:
             return jsonify({'code': 404, 'message': 'No credential for this asset'}), 404
 
@@ -642,7 +675,7 @@ def update_asset_password(asset_id):
                 if r.status_code != 0:
                     return jsonify({'code': 400, 'message': '新密码无法通过 WinRM 认证，请确认密码正确'}), 400
             except Exception as e:
-                return jsonify({'code': 400, 'message': f'新密码 WinRM 验证失败: {str(e)[:120]}'}), 400
+                return jsonify({'code': 400, 'message': '新密码验证失败'}), 400
 
         # Check password history — reject if password was used before
         from app.services.password_rotation import is_password_reused, validate_password_strength
@@ -673,7 +706,7 @@ def update_asset_password(asset_id):
     except Exception as e:
         db.session.rollback()
         logger.error(f"[PASSWORD_UPDATE] Failed: {str(e)}", exc_info=True)
-        return jsonify({'code': 500, 'message': str(e)}), 500
+        return jsonify({'code': 500, 'message': '操作失败，请稍后重试'}), 500
 
 
 @asset_bp.route('/<int:asset_id>/reset-fingerprint', methods=['POST'])
@@ -702,7 +735,7 @@ def check_connectivity():
         return jsonify({'code': 200, 'message': '资产连通性检测已启动'})
     except Exception as e:
         logger.error("[ERROR] Check connectivity failed", exc_info=True)
-        return jsonify({'code': 500, 'message': str(e)}), 500
+        return jsonify({'code': 500, 'message': '操作失败，请稍后重试'}), 500
 
 _batch_tasks = {}  # task_id -> result dict
 

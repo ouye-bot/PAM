@@ -30,7 +30,7 @@ def trigger_rotation(asset_id):
         logger.error(f"[ROTATION API] Rotation failed for asset_id: {asset_id}", exc_info=True)
         return jsonify({
             "code": 500,
-            "message": f"Rotation failed: {str(e)}"
+            "message": "改密操作失败，请稍后重试"
         }), 500
 
 @rotation_bp.route('/history/<int:asset_id>', methods=['GET'])
@@ -70,7 +70,7 @@ def get_rotation_history(asset_id):
     except Exception as e:
         return jsonify({
             "code": 500,
-            "message": f"Failed to get rotation history: {str(e)}"
+            "message": "获取改密历史失败"
         }), 500
 
 
@@ -88,7 +88,7 @@ def get_schedules():
         })
     except Exception as e:
         logger.error(f"[SCHEDULE API] Get schedules failed: {str(e)}")
-        return jsonify({"code": 500, "message": str(e)}), 500
+        return jsonify({"code": 500, "message": "获取排程失败"}), 500
 
 
 @rotation_bp.route('/schedules', methods=['POST'])
@@ -119,7 +119,7 @@ def create_schedule():
         return jsonify({"code": 200, "message": "调度创建成功", "data": result})
     except Exception as e:
         logger.error(f"[SCHEDULE API] Create schedule failed: {str(e)}")
-        return jsonify({"code": 500, "message": str(e)}), 500
+        return jsonify({"code": 500, "message": "获取排程失败"}), 500
 
 
 @rotation_bp.route('/schedules/<schedule_id>', methods=['PUT'])
@@ -154,7 +154,7 @@ def update_schedule(schedule_id):
         return jsonify({"code": 200, "message": "调度更新成功", "data": result})
     except Exception as e:
         logger.error(f"[SCHEDULE API] Update schedule failed: {str(e)}")
-        return jsonify({"code": 500, "message": str(e)}), 500
+        return jsonify({"code": 500, "message": "获取排程失败"}), 500
 
 
 @rotation_bp.route('/schedules/<schedule_id>', methods=['DELETE'])
@@ -170,7 +170,7 @@ def delete_schedule(schedule_id):
         return jsonify({"code": 200, "message": "调度已删除"})
     except Exception as e:
         logger.error(f"[SCHEDULE API] Delete schedule failed: {str(e)}")
-        return jsonify({"code": 500, "message": str(e)}), 500
+        return jsonify({"code": 500, "message": "获取排程失败"}), 500
 
 
 @rotation_bp.route('/schedules/asset-options', methods=['GET'])
@@ -189,4 +189,4 @@ def get_asset_options():
         } for a in assets]
         return jsonify({"code": 200, "data": options})
     except Exception as e:
-        return jsonify({"code": 500, "message": str(e)}), 500
+        return jsonify({"code": 500, "message": "获取排程失败"}), 500

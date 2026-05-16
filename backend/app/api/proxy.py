@@ -34,7 +34,7 @@ def create_token():
         }), 404
 
     # 获取凭证
-    credential = Credential.query.filter_by(asset_id=asset_id).first()
+    credential = Credential.query.filter_by(asset_id=asset_id).order_by(Credential.id.desc()).first()
     if not credential:
         return jsonify({
             'code': 404,
