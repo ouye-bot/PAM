@@ -106,7 +106,14 @@ def index():
 # 健康检查路由
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    checks = {'database': 'unknown', 'master_key': 'unknown', 'active_work_key': 'unknown'}
+    checks = {
+        'database': 'unknown',
+        'master_key': 'unknown',
+        'active_work_key': 'unknown',
+        'redis': 'unknown',
+        'scheduler': 'unknown',
+        'recordings_dir': 'unknown',
+    }
     overall = 'ok'
 
     # 数据库检查
@@ -139,6 +146,39 @@ def health_check():
             checks['active_work_key'] = 'not_found'
     except Exception as e:
         checks['active_work_key'] = f'error: {str(e)}'
+
+    # Redis 检查
+    try:
+        import redis as redis_lib
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+        r = redis_lib.Redis.from_url(redis_url, socket_connect_timeout=2)
+        r.ping()
+        checks['redis'] = 'ok'
+    except Exception as e:
+        checks['redis'] = f'error: {str(e)}'
+        if overall == 'ok':
+            overall = 'degraded'
+
+    # 调度器状态
+    try:
+        from app.scheduler import scheduler
+        checks['scheduler'] = 'ok' if scheduler.running else 'stopped'
+    except Exception as e:
+        checks['scheduler'] = f'error: {str(e)}'
+
+    # 录制目录可写性
+    try:
+        import tempfile
+        recordings_dir = os.path.join(os.path.dirname(__file__), 'recordings')
+        if not os.path.exists(recordings_dir):
+            os.makedirs(recordings_dir, exist_ok=True)
+        test_file = os.path.join(recordings_dir, '.health_check_tmp')
+        with open(test_file, 'w') as f:
+            f.write('ok')
+        os.remove(test_file)
+        checks['recordings_dir'] = 'ok'
+    except Exception as e:
+        checks['recordings_dir'] = f'error: {str(e)}'
 
     from app import __version__
     return jsonify({
