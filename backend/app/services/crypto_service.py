@@ -107,10 +107,19 @@ def store_master_key_to_keyring(master_key):
         return False
 
 class CryptoService:
+    # SM4 密文格式版本
+    FORMAT_V1 = 0x01  # 旧格式: SM3(work_key + payload)
+    FORMAT_V2 = 0x02  # 新格式: SM3(hmac_key + iv + ciphertext), 独立 HMAC 子密钥
+
     @staticmethod
     def get_master_key():
         """获取主密钥，从密钥链或环境变量读取"""
         return get_master_key()
+
+    @staticmethod
+    def _derive_hmac_key(work_key):
+        """从工作密钥派生独立的 HMAC 子密钥"""
+        return bytes.fromhex(CryptoService.sm3_hash((work_key + b"hmac-derive").hex()))
 
     @staticmethod
     def get_or_create_work_key():
@@ -145,16 +154,20 @@ class CryptoService:
 
     @staticmethod
     def sm4_encrypt(plaintext):
-        """使用工作密钥加密明文（SM4-CBC加密 + SM3-HMAC认证）"""
+        """使用工作密钥加密明文（SM4-CBC + SM3-HMAC V2）"""
         work_key, key_version = CryptoService.get_or_create_work_key()
         sm4 = CryptSM4()
         sm4.set_key(work_key, SM4_ENCRYPT)
         iv = os.urandom(16)
         ciphertext = sm4.crypt_cbc(iv, plaintext.encode())
-        payload = iv + ciphertext
-        hmac_hex = CryptoService.sm3_hash((work_key + payload).hex())
+        # V2 HMAC: SM3(hmac_key + iv + ciphertext)
+        hmac_key = CryptoService._derive_hmac_key(work_key)
+        hmac_input = hmac_key + iv + ciphertext
+        hmac_hex = CryptoService.sm3_hash(hmac_input.hex())
         hmac_bytes = bytes.fromhex(hmac_hex)
-        result = base64.b64encode(payload + hmac_bytes).decode()
+        # Format: [version_byte(1)] + [iv(16)] + [ciphertext] + [hmac(32)]
+        version_byte = bytes([CryptoService.FORMAT_V2])
+        result = base64.b64encode(version_byte + iv + ciphertext + hmac_bytes).decode()
         return result, key_version
 
     @staticmethod
@@ -188,17 +201,39 @@ class CryptoService:
             logger.error("[DECRYPT] Base64 解码失败: key_version_id=%s, %s", key_version_id, e)
             return None
 
-        # SM3-HMAC 认证：验证密文完整性（encrypt-then-MAC）
+        # 检测格式版本
+        import hmac as hmac_module
+        if len(data) >= 49 and data[0] in (CryptoService.FORMAT_V1, CryptoService.FORMAT_V2):
+            fmt_version = data[0]
+            data = data[1:]  # 去掉版本字节
+        else:
+            # 无版本字节 → 旧格式 (V1)
+            fmt_version = CryptoService.FORMAT_V1
+
+        # SM3-HMAC 认证
         if len(data) >= 48:
             payload = data[:-32]
             stored_hmac = data[-32:].hex()
-            expected_hmac = CryptoService.sm3_hash((work_key + payload).hex())
-            import hmac as hmac_module
+
+            if fmt_version == CryptoService.FORMAT_V2:
+                # V2: SM3(hmac_key + iv + ciphertext)
+                hmac_key = CryptoService._derive_hmac_key(work_key)
+                expected_hmac = CryptoService.sm3_hash((hmac_key + payload).hex())
+            else:
+                # V1: SM3(work_key + payload)
+                expected_hmac = CryptoService.sm3_hash((work_key + payload).hex())
+
             if hmac_module.compare_digest(stored_hmac, expected_hmac):
                 data = payload
             else:
-                logger.error("[DECRYPT] SM3-HMAC 认证失败: key_version_id=%s", key_version_id)
+                logger.error("[DECRYPT] SM3-HMAC 认证失败: key_version_id=%s, version=%s", key_version_id, fmt_version)
                 return None
+        elif len(data) >= 32:
+            # 无 HMAC 的旧格式（encrypt_with_work_key 路径），直接解密
+            logger.warning("[DECRYPT] 密文无HMAC: key_version_id=%s, len=%d", key_version_id, len(data))
+        else:
+            logger.error("[DECRYPT] 密文数据过短: key_version_id=%s, len=%d", key_version_id, len(data))
+            return None
 
         try:
             iv = data[:16]
